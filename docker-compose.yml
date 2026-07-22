@@ -23,7 +23,7 @@ services:
       - ./k6:/scripts
     environment:
       TARGET: http://app:8080
-      RATE: "1500"          # req/s — suba conforme sua máquina aguentar
+      RATE: "2000"          # req/s — suba conforme sua máquina aguentar
     depends_on:
       - app
 
