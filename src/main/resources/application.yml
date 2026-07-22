@@ -33,7 +33,9 @@ spring:
             # significa 2000 requests represados por segundo.
             connectTimeout: 500
             readTimeout: 2000
-            loggerLevel: NONE   # FULL/BASIC em produção gera custo relevante nesse volume
+            # FULL loga request/response (linha, headers e body) via FeignInfoLogger em INFO.
+            # ATENÇÃO: em produção a 2k req/s isso tem custo relevante — ajuste por ambiente.
+            loggerLevel: FULL
 
 resilience4j:
   circuitbreaker:

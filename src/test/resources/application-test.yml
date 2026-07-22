@@ -1,0 +1,43 @@
+# Perfil de teste: config enxuta para o circuito abrir/fechar com poucas chamadas.
+# A config de produção (minimumNumberOfCalls: 10000, TIME_BASED) é inviável em teste.
+
+api:
+  pedidos:
+    url: http://localhost:8089   # porta do WireMock (ver PedidoResilienceIT)
+
+spring:
+  # Sem virtual threads no teste: a concorrência do bulkhead é controlada
+  # manualmente por um ExecutorService no próprio teste.
+  threads:
+    virtual:
+      enabled: false
+  cloud:
+    openfeign:
+      client:
+        config:
+          default:
+            loggerLevel: NONE   # evita poluir a saída dos testes
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      pedidoClient:
+        baseConfig: default
+        # COUNT_BASED para decidir de forma determinística com amostra pequena
+        slidingWindowType: COUNT_BASED
+        slidingWindowSize: 5
+        minimumNumberOfCalls: 5
+        failureRateThreshold: 50
+        # Desliga o gatilho de slow-call: os testes de bulkhead usam respostas
+        # lentas (delay) que NÃO devem ser interpretadas como falha do circuito.
+        slowCallDurationThreshold: 10s
+        slowCallRateThreshold: 100
+        waitDurationInOpenState: 1s
+        permittedNumberOfCallsInHalfOpenState: 3
+        # Transição OPEN->HALF_OPEN feita manualmente no teste (determinístico)
+        automaticTransitionFromOpenToHalfOpenEnabled: false
+  bulkhead:
+    instances:
+      pedidoClient:
+        maxConcurrentCalls: 2
+        maxWaitDuration: 0     # fail fast: estoura na hora quando cheio
