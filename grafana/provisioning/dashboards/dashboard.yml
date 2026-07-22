@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: resilience4j
+    folder: Resilience
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

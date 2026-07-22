@@ -1,0 +1,105 @@
+spring:
+  application:
+    name: feign-cb-demo
+
+  # Java 25 + Boot 3.5: virtual threads eliminam o gargalo de thread pool
+  # do Tomcat em chamadas HTTP bloqueantes (Feign) sob alta carga.
+  threads:
+    virtual:
+      enabled: true
+
+  cloud:
+    openfeign:
+      circuitbreaker:
+        enabled: true
+      httpclient:
+        hc5:
+          enabled: true
+          ool-reuse-policy: LIFO 
+          socket-timeout: 2000
+          socket-timeout-unit: MILLISECONDS
+        # Pool de conexões dimensionado para alta carga.
+        # Regra prática: max-per-route >= (req/s para a dependência) x (latência p99 em s)
+        # Ex.: 2000 req/s x 0.2s = 400 conexões simultâneas no pior caso.
+        max-connections: 1000
+        max-connections-per-route: 500
+        connection-timer-repeat: 3000
+        time-to-live: 60
+        time-to-live-unit: SECONDS
+      client:
+        config:
+          default:
+            # Fail fast: timeouts curtos. A 2k req/s, 1s de espera extra
+            # significa 2000 requests represados por segundo.
+            connectTimeout: 500
+            readTimeout: 2000
+            loggerLevel: NONE   # FULL/BASIC em produção gera custo relevante nesse volume
+
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        # TIME_BASED é obrigatório em alta vazão: uma janela COUNT_BASED de
+        # 10-100 chamadas satura em milissegundos a 2k req/s e o circuito
+        # reagiria a ruído instantâneo, não a tendência real.
+        slidingWindowType: TIME_BASED
+        slidingWindowSize: 10                    # janela de 10 segundos
+        minimumNumberOfCalls: 10000            # não decide com amostra pequena
+        failureRateThreshold: 50
+        # Slow calls: em alta carga, dependência LENTA é pior que dependência
+        # FORA — esgota conexões/memória antes de gerar erro. O circuito
+        # também abre se 80% das chamadas passarem de 500ms.
+        slowCallDurationThreshold: 500ms
+        slowCallRateThreshold: 80
+        waitDurationInOpenState: 5s
+        automaticTransitionFromOpenToHalfOpenEnabled: true
+        # Half-open com amostra decente para reavaliar sob carga real
+        permittedNumberOfCallsInHalfOpenState: 50
+        registerHealthIndicator: true
+        # Erros de negócio (traduzidos pelo ErrorDecoder) não abrem o circuito
+        ignoreExceptions:
+          - com.example.demo.exception.BusinessException
+        recordExceptions:
+          - java.io.IOException
+          - java.util.concurrent.TimeoutException
+          - feign.RetryableException
+          - com.example.demo.exception.DownstreamServerException
+    instances:
+      pedidoClient:
+        baseConfig: default
+
+  # Bulkhead: teto de chamadas simultâneas para a dependência.
+  # Protege o pool de conexões e impede que UMA dependência lenta
+  # consuma todos os recursos da aplicação.
+  bulkhead:
+    instances:
+      pedidoClient:
+        maxConcurrentCalls: 400
+        maxWaitDuration: 0     # não enfileira: estoura na hora (fail fast -> fallback)
+
+management:
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+  endpoints:
+    web:
+      exposure:
+        include: health, prometheus, circuitbreakers, metrics
+  endpoint:
+    health:
+      show-details: always
+  health:
+    circuitbreakers:
+      enabled: true
+
+api:
+  pedidos:
+    url: ${API_PEDIDOS_URL:http://localhost:8081}
+
+server:
+  tomcat:
+    # Com virtual threads o limite de threads deixa de ser o gargalo,
+    # mas o de conexões aceitas ainda vale ajustar para 2k req/s.
+    max-connections: 10000
+    accept-count: 500

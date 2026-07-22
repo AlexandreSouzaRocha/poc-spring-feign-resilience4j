@@ -1,0 +1,17 @@
+{
+  "priority": 10,
+  "request": {
+    "method": "GET",
+    "urlPathPattern": "/pedidos/.*"
+  },
+  "response": {
+    "status": 200,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": {
+      "id": "{{request.pathSegments.[1]}}",
+      "status": "CONFIRMADO",
+      "degraded": false
+    },
+    "transformers": ["response-template"]
+  }
+}

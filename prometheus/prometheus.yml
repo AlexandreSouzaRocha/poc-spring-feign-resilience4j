@@ -1,0 +1,9 @@
+global:
+  scrape_interval: 2s        # curto de proposito: demo da transicao de estados
+  evaluation_interval: 2s
+
+scrape_configs:
+  - job_name: feign-cb-demo
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['app:8080']
