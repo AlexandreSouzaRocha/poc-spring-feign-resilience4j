@@ -14,6 +14,67 @@ Sanidade:
     curl -s localhost:8080/api/pedidos/123 | jq
     # {"id":"123","status":"CONFIRMADO","degraded":false}
 
+## Fluxo de disparo do circuit breaker
+
+Toda consulta atravessa quatro camadas antes de bater no serviço de pedidos:
+
+    Controller
+      -> BulkheadedPedidoService   (@Bulkhead: teto de chamadas concorrentes)
+        -> PedidoClient            (@FeignClient: CircuitBreaker + fallbackFactory)
+          -> serviço de pedidos    (HTTP downstream)
+
+### 1. Classificacao da falha (ErrorDecoder)
+
+`PedidoErrorDecoder` traduz o status HTTP em exceção tipada, e isso decide se
+a chamada conta ou nao para o circuito:
+
+| Status downstream | Exceção                    | Efeito no circuito         |
+|-------------------|----------------------------|----------------------------|
+| 4xx               | `BusinessException`        | IGNORADA (`ignoreExceptions`) |
+| 5xx / 1xx / 3xx   | `DownstreamServerException`| CONTA (`recordExceptions`) |
+| timeout / conexão | `RetryableException`, `IOException`, `TimeoutException` | CONTA (`recordExceptions`) |
+
+Chamada LENTA (acima de `slowCallDurationThreshold`, 500ms) tambem CONTA, mesmo
+retornando 200 — sob alta carga, dependência lenta é pior que dependência fora.
+
+### 2. Quando o circuito abre
+
+O CircuitBreaker acumula resultados numa janela TIME_BASED de 10s e só decide
+apos `minimumNumberOfCalls`. Abre (CLOSED -> OPEN) quando, na janela:
+
+- `failureRate > 50%`  (falhas técnicas registradas), OU
+- `slowCallRate > 80%` (chamadas acima de 500ms)
+
+### 3. Estados e transicoes
+
+| Estado    | Comportamento                                                        |
+|-----------|----------------------------------------------------------------------|
+| CLOSED    | chamadas passam; resultados sao medidos                              |
+| OPEN      | fail-fast: lança `CallNotPermittedException` sem tocar no downstream |
+| HALF_OPEN | apos `waitDurationInOpenState` (5s); libera N chamadas de sondagem   |
+
+De HALF_OPEN: sondagens OK -> CLOSED; sondagens falhando -> OPEN de novo.
+
+### 4. O fallback intercepta a exceção (importante)
+
+Como o `@FeignClient` tem `fallbackFactory`, **a chamada do Feign nunca propaga
+falha técnica**: em vez de lançar, ela RETORNA o valor default degradado
+(`status=INDISPONIVEL`, `degraded=true`, header `X-Degraded: true`).
+
+    RetryableException / 5xx / timeout / CallNotPermitted (circuito aberto)
+        -> fallbackFactory -> retorna PedidoResponse.defaultValue(id)   (NÃO lança)
+
+    BusinessException (4xx)
+        -> fallbackFactory faz `throw be` -> propaga -> Controller responde 4xx
+
+Consequência prática: um `try/catch` no service cobrindo `RetryableException`
+(ou qualquer falha técnica) seria código morto — o fallback já a converteu em
+resposta default antes de ela subir. A única exceção que chega ao service/controller
+é a `BusinessException`, porque o fallback a relança de propósito.
+
+O gráfico "Chamadas por resultado" do Grafana reflete isso: `ignored` =
+BusinessException; `not_permitted` = bloqueadas com circuito aberto.
+
 ## Roteiro: ver o circuito abrir
 
 Terminal 1 — carga continua:
