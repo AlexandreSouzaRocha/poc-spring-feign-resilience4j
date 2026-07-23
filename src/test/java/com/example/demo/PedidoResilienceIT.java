@@ -1,9 +1,5 @@
 package com.example.demo;
 
-import com.github.tomakehurst.wiremock.WireMockServer;
-import com.github.tomakehurst.wiremock.client.MappingBuilder;
-import com.github.tomakehurst.wiremock.client.ResponseDefinitionBuilder;
-import com.github.tomakehurst.wiremock.client.WireMock;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker.State;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
@@ -12,6 +8,10 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockserver.integration.ClientAndServer;
+import org.mockserver.model.HttpRequest;
+import org.mockserver.model.HttpResponse;
+import org.mockserver.verify.VerificationTimes;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -27,13 +27,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
-import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
-import static com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor;
-import static com.github.tomakehurst.wiremock.client.WireMock.lessThanOrExactly;
-import static com.github.tomakehurst.wiremock.client.WireMock.okJson;
-import static com.github.tomakehurst.wiremock.client.WireMock.urlPathMatching;
-import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockserver.integration.ClientAndServer.startClientAndServer;
+import static org.mockserver.model.HttpRequest.request;
+import static org.mockserver.model.HttpResponse.response;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -49,7 +46,7 @@ class PedidoResilienceIT {
     private static final int BULKHEAD_MAX_CONCURRENT_CALLS = 2;
     private static final int HALF_OPEN_PERMITTED_CALLS = 3;
 
-    private static WireMockServer downstream;
+    private static ClientAndServer downstream;
 
     @Autowired
     private MockMvc mockMvc;
@@ -59,8 +56,8 @@ class PedidoResilienceIT {
 
     @BeforeAll
     static void startDownstream() {
-        downstream = new WireMockServer(options().port(8089));
-        downstream.start();
+        System.setProperty("mockserver.logLevel", "WARN");
+        downstream = startClientAndServer(8089);
     }
 
     @AfterAll
@@ -70,7 +67,7 @@ class PedidoResilienceIT {
 
     @BeforeEach
     void resetState() {
-        downstream.resetAll();
+        downstream.reset();
         circuitBreaker().reset();
     }
 
@@ -129,7 +126,7 @@ class PedidoResilienceIT {
                 .andExpect(header().string("X-Degraded", "true"))
                 .andExpect(jsonPath("$.status").value("INDISPONIVEL"));
 
-        downstream.verify(0, getRequestedFor(urlPathMatching(DOWNSTREAM_PATH)));
+        downstream.verify(orderRequest(), VerificationTimes.exactly(0));
     }
 
     @Test
@@ -177,9 +174,7 @@ class PedidoResilienceIT {
 
         assertThat(degradedResponses)
                 .isGreaterThanOrEqualTo(totalRequests - BULKHEAD_MAX_CONCURRENT_CALLS);
-        downstream.verify(
-                lessThanOrExactly(BULKHEAD_MAX_CONCURRENT_CALLS),
-                getRequestedFor(urlPathMatching(DOWNSTREAM_PATH)));
+        downstream.verify(orderRequest(), VerificationTimes.atMost(BULKHEAD_MAX_CONCURRENT_CALLS));
         assertThat(currentState()).isEqualTo(State.CLOSED);
     }
 
@@ -217,22 +212,26 @@ class PedidoResilienceIT {
     }
 
     private void givenDownstreamReturnsOrder() {
-        downstream.stubFor(getOrder().willReturn(orderPayload()));
+        downstream.when(orderRequest()).respond(orderResponse());
     }
 
     private void givenDownstreamReturnsOrderAfter(int delayMs) {
-        downstream.stubFor(getOrder().willReturn(orderPayload().withFixedDelay(delayMs)));
+        downstream.when(orderRequest())
+                .respond(orderResponse().withDelay(TimeUnit.MILLISECONDS, delayMs));
     }
 
     private void givenDownstreamReturnsStatus(int status) {
-        downstream.stubFor(getOrder().willReturn(aResponse().withStatus(status)));
+        downstream.when(orderRequest()).respond(response().withStatusCode(status));
     }
 
-    private static MappingBuilder getOrder() {
-        return WireMock.get(urlPathMatching(DOWNSTREAM_PATH));
+    private static HttpRequest orderRequest() {
+        return request().withMethod("GET").withPath(DOWNSTREAM_PATH);
     }
 
-    private static ResponseDefinitionBuilder orderPayload() {
-        return okJson("{\"id\":\"1\",\"status\":\"CONFIRMADO\",\"degraded\":false}");
+    private static HttpResponse orderResponse() {
+        return response()
+                .withStatusCode(200)
+                .withHeader("Content-Type", "application/json")
+                .withBody("{\"id\":\"1\",\"status\":\"CONFIRMADO\",\"degraded\":false}");
     }
 }
